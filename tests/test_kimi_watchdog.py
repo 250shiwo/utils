@@ -85,5 +85,107 @@ class TestParseDeadline(unittest.TestCase):
             kw.parse_deadline("明天八点", now=self.NOW)
 
 
+# API 返回样例（来自社区逆向工程文档），各任务复用
+SAMPLE_API_DATA = {
+    "usage": {
+        "limit": "100",        # 本周总配额
+        "remaining": "74",     # 本周剩余配额
+        "resetTime": "2026-02-11T17:32:50.757941Z",
+    },
+    "limits": [
+        {
+            "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+            "detail": {"limit": "100", "remaining": "85",
+                       "resetTime": "2026-02-07T12:32:50.757941Z"},
+        }
+    ],
+    "user": {"membership": {"level": "LEVEL_INTERMEDIATE"}},
+}
+
+
+class _FakeResponse:
+    """模拟 urllib 的响应对象"""
+
+    def __init__(self, payload, status=200):
+        self._payload = json.dumps(payload).encode("utf-8")
+        self.status = status
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class TestFetchUsage(unittest.TestCase):
+    """fetch_usage：API 请求"""
+
+    def test_ok(self):
+        """正常返回：携带 Bearer 头，解析 JSON"""
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               return_value=_FakeResponse(SAMPLE_API_DATA)) as m:
+            data = kw.fetch_usage("sk-test")
+        self.assertEqual(data["usage"]["remaining"], "74")
+        # 校验请求头中包含 Bearer 认证
+        req = m.call_args[0][0]
+        self.assertEqual(req.headers["Authorization"], "Bearer sk-test")
+
+    def test_non_200_raises(self):
+        """非 200 状态码抛异常"""
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               return_value=_FakeResponse({}, status=500)):
+            with self.assertRaises(RuntimeError):
+                kw.fetch_usage("sk-test")
+
+    def test_bad_json_raises(self):
+        """返回非 JSON 抛异常"""
+        bad = _FakeResponse(SAMPLE_API_DATA)
+        bad._payload = b"not json"
+        with mock.patch.object(kw.urllib.request, "urlopen", return_value=bad):
+            with self.assertRaises(Exception):
+                kw.fetch_usage("sk-test")
+
+
+class TestExtractUsageInfo(unittest.TestCase):
+    """extract_usage_info：原始 JSON 规整"""
+
+    def test_full_data(self):
+        info = kw.extract_usage_info(SAMPLE_API_DATA)
+        self.assertEqual(info["limit"], "100")
+        self.assertEqual(info["remaining"], "74")
+        self.assertEqual(info["reset_time"], "2026-02-11T17:32:50.757941Z")
+        self.assertEqual(info["window_remaining"], "85")
+        self.assertEqual(info["membership"], "LEVEL_INTERMEDIATE")
+
+    def test_empty_data(self):
+        """字段缺失时返回 None 而不是崩溃"""
+        info = kw.extract_usage_info({})
+        self.assertIsNone(info["limit"])
+        self.assertIsNone(info["remaining"])
+        self.assertIsNone(info["reset_time"])
+        self.assertIsNone(info["window_remaining"])
+        self.assertEqual(info["membership"], "")
+
+
+class TestComputeUsedPercent(unittest.TestCase):
+    """compute_used_percent：周用量百分比"""
+
+    def test_normal(self):
+        # (100 - 74) / 100 = 26%
+        self.assertAlmostEqual(
+            kw.compute_used_percent({"limit": "100", "remaining": "74"}), 26.0)
+
+    def test_zero_limit(self):
+        """limit 为 0 时返回 0.0，避免除零"""
+        self.assertEqual(kw.compute_used_percent({"limit": "0", "remaining": "0"}), 0.0)
+
+    def test_all_used(self):
+        self.assertAlmostEqual(
+            kw.compute_used_percent({"limit": "50", "remaining": "0"}), 100.0)
+
+
 if __name__ == "__main__":
     unittest.main()

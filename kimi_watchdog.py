@@ -104,3 +104,62 @@ def parse_deadline(time_str, now=None):
         raise ValueError(
             f"无法解析时间参数: {time_str!r}，支持 'HH:MM' 或 'YYYY-MM-DD HH:MM' 格式"
         )
+
+
+# ==================== 用量获取与解析 ====================
+def fetch_usage(api_key):
+    """调用 Kimi Code 用量接口，返回解析后的 JSON 字典。
+
+    :param api_key: Kimi Code API Key
+    :return: API 原始 JSON（dict）
+    :raises RuntimeError: HTTP 状态码非 200
+    :raises Exception: 网络错误、超时、JSON 解析失败等
+    """
+    req = urllib.request.Request(
+        API_URL, headers={"Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"API 返回状态码 {resp.status}")
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def extract_usage_info(data):
+    """把 API 原始 JSON 规整为统一的信息字典。
+
+    从 "usage" 提取周配额三项；从 "limits" 中找到 5 小时（300 分钟）
+    滚动窗口的剩余额度；从 "user.membership.level" 提取会员等级。
+
+    :param data: fetch_usage 返回的原始 JSON
+    :return: {"limit", "remaining", "reset_time",
+              "window_remaining", "membership"}，缺失字段为 None
+    """
+    # 周配额信息
+    weekly = data.get("usage", {}) or {}
+    # 在 limits 数组中查找 5 小时滚动窗口（duration=300 分钟）
+    window_detail = None
+    for item in data.get("limits", []) or []:
+        w = item.get("window", {}) or {}
+        if w.get("timeUnit") == "TIME_UNIT_MINUTE" and w.get("duration") == 300:
+            window_detail = item.get("detail", {}) or {}
+            break
+    return {
+        "limit": weekly.get("limit"),
+        "remaining": weekly.get("remaining"),
+        "reset_time": weekly.get("resetTime"),
+        "window_remaining": window_detail.get("remaining") if window_detail else None,
+        "membership": (data.get("user", {}) or {}).get(
+            "membership", {}).get("level", ""),
+    }
+
+
+def compute_used_percent(usage):
+    """计算周用量百分比。
+
+    :param usage: 含 "limit" 与 "remaining" 键的字典（值可为字符串，API 如此返回）
+    :return: 用量百分比（float，如 26.0 表示 26%）；limit<=0 时返回 0.0 防除零
+    """
+    limit = float(usage["limit"])
+    remaining = float(usage["remaining"])
+    if limit <= 0:
+        return 0.0
+    return (limit - remaining) / limit * 100
