@@ -191,3 +191,51 @@ def send_serverchan(sendkey, title, body):
     except Exception as e:
         print(f"[警告] Server酱发送失败: {e}")
         return False
+
+
+# ==================== 通知消息构建 ====================
+def format_reset_time(iso_str):
+    """把 API 返回的 ISO 时间（UTC，Z 后缀）转为本地可读时间。
+
+    :param iso_str: 如 "2026-02-11T17:32:50.757941Z"，可能为 None
+    :return: "YYYY-MM-DD HH:MM" 本地时间；解析失败返回原串；None 返回 "未知"
+    """
+    if not iso_str:
+        return "未知"
+    try:
+        # Python 3.8 的 fromisoformat 不认 "Z"，需替换为 "+00:00"
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return iso_str
+
+
+def build_message(reason, info):
+    """组装通知标题与正文。
+
+    :param reason: 触发原因描述（如 "本周用量已达 80.0%（阈值 80%）"）
+    :param info: extract_usage_info 返回的用量信息字典
+    :return: (title, body) 二元组
+    """
+    limit = info.get("limit")
+    remaining = info.get("remaining")
+    # 百分比与已用量（API 返回字符串，需转数值）
+    pct = compute_used_percent({"limit": limit, "remaining": remaining})
+    used = float(limit) - float(remaining)
+
+    title = f"【Kimi额度提醒】{reason}"
+    lines = [
+        f"触发原因：{reason}",
+        "",
+        f"本周用量：{used:g} / {limit}（{pct:.1f}%）",
+        f"本周剩余：{remaining}",
+        f"重置时间：{format_reset_time(info.get('reset_time'))}",
+    ]
+    # 5 小时滚动窗口剩余（可能缺失）
+    if info.get("window_remaining") is not None:
+        lines.append(f"5小时窗口剩余：{info['window_remaining']}")
+    # 会员等级（可能缺失）
+    if info.get("membership"):
+        lines.append(f"会员等级：{info['membership']}")
+    lines += ["", f"—— kimi-watchdog 于 {datetime.now():%Y-%m-%d %H:%M:%S}"]
+    return title, "\n".join(lines)

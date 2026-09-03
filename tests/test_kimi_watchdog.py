@@ -209,5 +209,41 @@ class TestSendServerChan(unittest.TestCase):
             self.assertFalse(kw.send_serverchan("SCT123", "标题", "正文"))
 
 
+class TestFormatResetTime(unittest.TestCase):
+    """format_reset_time：ISO 时间转可读格式"""
+
+    def test_iso_with_z(self):
+        # Z 后缀的 UTC 时间可正常解析并转换为本地时区
+        result = kw.format_reset_time("2026-02-11T17:32:50.757941Z")
+        self.assertRegex(result, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+
+    def test_invalid_returns_original(self):
+        """解析失败返回原字符串"""
+        self.assertEqual(kw.format_reset_time("garbage"), "garbage")
+
+    def test_none_returns_placeholder(self):
+        """None 返回'未知'"""
+        self.assertEqual(kw.format_reset_time(None), "未知")
+
+
+class TestBuildMessage(unittest.TestCase):
+    """build_message：通知内容组装"""
+
+    def test_content(self):
+        info = kw.extract_usage_info(SAMPLE_API_DATA)
+        title, body = kw.build_message("本周用量已达 26.0%（阈值 25%）", info)
+        self.assertIn("本周用量已达 26.0%", title)
+        self.assertIn("触发原因", body)
+        self.assertIn("26 / 100", body)          # 已用 / 总量
+        self.assertIn("26.0%", body)             # 百分比
+        self.assertIn("剩余：74", body)           # 剩余额度
+        # 重置时间：UTC 转 本地时区（与实现相同算法，保证测试与时区无关）
+        expected_local = datetime.fromisoformat(
+            "2026-02-11T17:32:50.757941+00:00").astimezone().strftime("%Y-%m-%d %H:%M")
+        self.assertIn(expected_local, body)
+        self.assertIn("5小时窗口剩余：85", body)   # 滚动窗口
+        self.assertIn("LEVEL_INTERMEDIATE", body) # 会员等级
+
+
 if __name__ == "__main__":
     unittest.main()
