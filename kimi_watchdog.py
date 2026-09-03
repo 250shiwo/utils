@@ -163,3 +163,31 @@ def compute_used_percent(usage):
     if limit <= 0:
         return 0.0
     return (limit - remaining) / limit * 100
+
+
+# ==================== 通知发送 ====================
+def send_serverchan(sendkey, title, body):
+    """通过 Server酱 推送到微信。
+
+    Server酱是一个纯 HTTP POST 接口，无需安装任何 SDK：
+    POST https://sctapi.ftqq.com/<sendkey>.send，表单参数 title 与 desp。
+
+    :param sendkey: Server酱的 SendKey
+    :param title: 通知标题（最长 32 字，服务端截断）
+    :param body: 通知正文（Markdown）
+    :return: True=发送成功，False=失败（已打印警告，不抛异常）
+    """
+    url = SERVERCHAN_URL.format(sendkey)
+    data = urllib.parse.urlencode({"title": title, "desp": body}).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=data)
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            # Server酱约定 code==0 表示成功
+            if result.get("code") == 0:
+                return True
+            print(f"[警告] Server酱返回错误: {result}")
+            return False
+    except Exception as e:
+        print(f"[警告] Server酱发送失败: {e}")
+        return False

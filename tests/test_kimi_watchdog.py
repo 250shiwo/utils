@@ -187,5 +187,27 @@ class TestComputeUsedPercent(unittest.TestCase):
             kw.compute_used_percent({"limit": "50", "remaining": "0"}), 100.0)
 
 
+class TestSendServerChan(unittest.TestCase):
+    """send_serverchan：Server酱推送"""
+
+    def test_ok(self):
+        """Server酱返回 code==0 视为成功"""
+        resp = _FakeResponse({"code": 0, "message": ""})
+        with mock.patch.object(kw.urllib.request, "urlopen", return_value=resp):
+            self.assertTrue(kw.send_serverchan("SCT123", "标题", "正文"))
+
+    def test_api_error_code(self):
+        """Server酱返回非 0 code 视为失败，但不抛异常"""
+        resp = _FakeResponse({"code": 40001, "message": "bad sendkey"})
+        with mock.patch.object(kw.urllib.request, "urlopen", return_value=resp):
+            self.assertFalse(kw.send_serverchan("SCT123", "标题", "正文"))
+
+    def test_network_error(self):
+        """网络异常不抛出，返回 False"""
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               side_effect=OSError("timeout")):
+            self.assertFalse(kw.send_serverchan("SCT123", "标题", "正文"))
+
+
 if __name__ == "__main__":
     unittest.main()
