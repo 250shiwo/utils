@@ -245,5 +245,122 @@ class TestBuildMessage(unittest.TestCase):
         self.assertIn("LEVEL_INTERMEDIATE", body) # 会员等级
 
 
+# 主循环测试用的基础配置：启用 Server酱，轮询间隔 0 秒
+LOOP_CFG = {"api_key": "sk-test", "poll_interval_sec": 0,
+            "serverchan_sendkey": "SCT123"}
+
+
+def _make_usage_data(remaining):
+    """构造指定剩余额度的 API 返回数据（limit 固定 100）"""
+    return {
+        "usage": {"limit": "100", "remaining": remaining,
+                  "resetTime": "2099-01-01T00:00:00Z"},
+        "limits": [], "user": {"membership": {"level": "L1"}},
+    }
+
+
+class TestMainArgs(unittest.TestCase):
+    """命令行参数校验"""
+
+    def test_monitor_mode_requires_both_args(self):
+        """监控模式缺少参数时报错退出（argparse 的 error 走 exit code 2）"""
+        with mock.patch.object(kw, "load_config", return_value=dict(LOOP_CFG)):
+            with self.assertRaises(SystemExit):
+                kw.main(["80"])
+
+    def test_missing_api_key(self):
+        """未配置 API Key 时以 EXIT_ERROR 退出"""
+        with mock.patch.object(kw, "load_config",
+                               return_value={"api_key": "", "poll_interval_sec": 600,
+                                             "serverchan_sendkey": ""}):
+            self.assertEqual(kw.main(["80", "2099-12-31 23:59"]), kw.EXIT_ERROR)
+
+    def test_no_serverchan_key(self):
+        """未配置 Server酱 SendKey 时以 EXIT_ERROR 退出"""
+        cfg = {"api_key": "sk", "poll_interval_sec": 600,
+               "serverchan_sendkey": ""}
+        with mock.patch.object(kw, "load_config", return_value=cfg):
+            self.assertEqual(kw.main(["80", "2099-12-31 23:59"]), kw.EXIT_ERROR)
+
+
+class TestMainLoop(unittest.TestCase):
+    """主循环触发逻辑（mock 掉 sleep / fetch_usage / send_serverchan）"""
+
+    def _run(self, argv, fetch=None):
+        """运行 main 的公共封装：mock 配置、sleep、通知"""
+        with mock.patch.object(kw, "load_config", return_value=dict(LOOP_CFG)), \
+                mock.patch.object(kw.time, "sleep"), \
+                mock.patch.object(kw, "send_serverchan") as mock_send, \
+                mock.patch.object(kw, "fetch_usage", fetch):
+            code = kw.main(argv)
+        return code, mock_send
+
+    def test_quota_trigger(self):
+        """用量 95% >= 阈值 90% -> EXIT_QUOTA，通知一次"""
+        code, mock_send = self._run(["90", "2099-12-31 23:59"],
+                                    fetch=mock.Mock(return_value=_make_usage_data("5")))
+        self.assertEqual(code, kw.EXIT_QUOTA)
+        mock_send.assert_called_once()
+        # 标题包含触发信息
+        title = mock_send.call_args[0][1]
+        self.assertIn("本周用量", title)
+
+    def test_quota_not_reached_polls_again(self):
+        """未达阈值时继续轮询：前 2 次 50%，第 3 次 5% 触发退出"""
+        side_effects = [_make_usage_data("50"), _make_usage_data("50"),
+                        _make_usage_data("5")]
+        fetch = mock.Mock(side_effect=side_effects)
+        code, _ = self._run(["90", "2099-12-31 23:59"], fetch=fetch)
+        self.assertEqual(code, kw.EXIT_QUOTA)
+        self.assertEqual(fetch.call_count, 3)  # 说明发生了多轮轮询
+
+    def test_time_trigger(self):
+        """到达指定时刻 -> EXIT_TIME"""
+        code, mock_send = self._run(["90", "2000-01-01 00:00"],
+                                    fetch=mock.Mock(return_value=_make_usage_data("50")))
+        self.assertEqual(code, kw.EXIT_TIME)
+        mock_send.assert_called_once()
+
+    def test_consecutive_failures_exit_error(self):
+        """API 连续 5 次失败 -> 发异常通知并以 EXIT_ERROR 退出"""
+        fetch = mock.Mock(side_effect=RuntimeError("boom"))
+        code, mock_send = self._run(["90", "2099-12-31 23:59"], fetch=fetch)
+        self.assertEqual(code, kw.EXIT_ERROR)
+        self.assertEqual(fetch.call_count, kw.MAX_CONSECUTIVE_FAILURES)
+        mock_send.assert_called_once()  # 发送"监控异常"通知
+
+    def test_failure_counter_resets(self):
+        """失败计数在成功后清零：失败4次、成功1次、再失败5次才退出"""
+        side_effects = [RuntimeError("e")] * 4 + [_make_usage_data("50")] \
+            + [RuntimeError("e")] * kw.MAX_CONSECUTIVE_FAILURES
+        fetch = mock.Mock(side_effect=side_effects)
+        code, _ = self._run(["90", "2099-12-31 23:59"], fetch=fetch)
+        self.assertEqual(code, kw.EXIT_ERROR)
+        # 4 失败 + 1 成功 + 5 失败 = 10 次调用
+        self.assertEqual(fetch.call_count, 10)
+
+
+class TestTestNotifyMode(unittest.TestCase):
+    """--test-notify 模式"""
+
+    def test_sends_test_notification(self):
+        """发送测试通知并返回 EXIT_OK"""
+        cfg = dict(LOOP_CFG)
+        with mock.patch.object(kw, "load_config", return_value=cfg), \
+                mock.patch.object(kw, "send_serverchan", return_value=True) as mock_send:
+            code = kw.main(["--test-notify"])
+        self.assertEqual(code, kw.EXIT_OK)
+        mock_send.assert_called_once()
+        self.assertIn("测试", mock_send.call_args[0][1])
+
+    def test_send_failure_returns_error(self):
+        """发送失败 -> EXIT_ERROR"""
+        cfg = dict(LOOP_CFG)
+        with mock.patch.object(kw, "load_config", return_value=cfg), \
+                mock.patch.object(kw, "send_serverchan", return_value=False):
+            code = kw.main(["--test-notify"])
+        self.assertEqual(code, kw.EXIT_ERROR)
+
+
 if __name__ == "__main__":
     unittest.main()

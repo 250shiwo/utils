@@ -239,3 +239,139 @@ def build_message(reason, info):
         lines.append(f"会员等级：{info['membership']}")
     lines += ["", f"—— kimi-watchdog 于 {datetime.now():%Y-%m-%d %H:%M:%S}"]
     return title, "\n".join(lines)
+
+
+# ==================== 命令行入口与主循环 ====================
+def main(argv=None):
+    """命令行入口：解析参数、加载配置，进入主循环或测试通知模式。
+
+    :param argv: 命令行参数列表（测试时注入），默认 sys.argv[1:]
+    :return: 进程退出码（见模块 docstring 的退出码约定）
+    """
+    parser = argparse.ArgumentParser(
+        description="Kimi Code 周额度监控：用量达阈值或到指定时刻时，"
+                    "通过 Server酱（微信推送）通知后退出。")
+    parser.add_argument("percent", nargs="?", type=float,
+                        help="周用量百分比阈值，如 80 表示用量达 80%% 触发")
+    parser.add_argument("deadline", nargs="?",
+                        help="目标时刻，如 18:00（已过则明天）或 2026-09-03 18:00")
+    parser.add_argument("--test-notify", action="store_true",
+                        help="仅发送测试通知验证渠道连通性，不做监控")
+    parser.add_argument("--config", default=CONFIG_FILE,
+                        help=f"配置文件路径（默认 {CONFIG_FILE}）")
+    args = parser.parse_args(argv)
+
+    # ---- 加载与校验配置 ----
+    cfg = load_config(args.config)
+
+    # --test-notify 模式：只发测试通知
+    if args.test_notify:
+        if not cfg.get("serverchan_sendkey"):
+            print("错误：未配置 serverchan_sendkey，请检查 config.json")
+            return EXIT_ERROR
+        print("正在发送测试通知...")
+        ok = send_serverchan(cfg["serverchan_sendkey"], "【Kimi额度监控】测试通知",
+                             "这是一条 kimi-watchdog 测试通知，收到即说明渠道配置正确。")
+        return EXIT_OK if ok else EXIT_ERROR
+
+    # 监控模式：两个位置参数必填
+    if args.percent is None or args.deadline is None:
+        parser.error("监控模式必须同时提供 <percent> 和 <time> 两个参数")
+
+    # 校验 API Key 与通知渠道
+    if not cfg.get("api_key"):
+        print("错误：未配置 API Key（config.json 的 api_key 或环境变量 KIMI_API_KEY）")
+        return EXIT_ERROR
+    if not cfg.get("serverchan_sendkey"):
+        print("错误：未配置 serverchan_sendkey，请检查 config.json")
+        return EXIT_ERROR
+
+    # 解析目标时刻
+    try:
+        deadline = parse_deadline(args.deadline)
+    except ValueError as e:
+        print(f"错误：{e}")
+        return EXIT_ERROR
+
+    interval = int(cfg.get("poll_interval_sec", 600))
+    print(f"开始监控：阈值 {args.percent}%，目标时刻 {deadline:%Y-%m-%d %H:%M}，"
+          f"轮询间隔 {interval} 秒。按 Ctrl+C 停止。")
+
+    failures = 0  # API 连续失败计数（成功一次即清零）
+    try:
+        while True:
+            now = datetime.now()
+
+            # ---- 条件一：到达指定时刻 ----
+            # 触发前尽力再取一次用量数据用于报告；取不到也不影响触发
+            if now >= deadline:
+                try:
+                    info = extract_usage_info(fetch_usage(cfg["api_key"]))
+                    title, body = build_message(
+                        f"已到达指定时刻 {deadline:%Y-%m-%d %H:%M}", info)
+                except Exception:
+                    title = "【Kimi额度提醒】已到达指定时刻"
+                    body = (f"触发原因：已到达指定时刻 {deadline:%Y-%m-%d %H:%M}\n"
+                            f"（触发时用量数据获取失败）")
+                _send_and_print(cfg, title, body,
+                                f"已到达指定时刻 {deadline:%Y-%m-%d %H:%M}")
+                return EXIT_TIME
+
+            # ---- 轮询用量 ----
+            try:
+                data = fetch_usage(cfg["api_key"])
+                info = extract_usage_info(data)
+                pct = compute_used_percent(
+                    {"limit": info["limit"], "remaining": info["remaining"]})
+                failures = 0  # 成功，清零连续失败计数
+            except Exception as e:
+                failures += 1
+                print(f"[警告] 第 {failures} 次 API 请求失败: {e}")
+                # 连续失败达上限：通知监控异常并退出
+                if failures >= MAX_CONSECUTIVE_FAILURES:
+                    _send_and_print(
+                        cfg, "【Kimi额度监控】监控异常",
+                        f"API 连续 {failures} 次请求失败，监控已退出。\n最后错误：{e}",
+                        "监控异常")
+                    return EXIT_ERROR
+                # 未达上限：睡到下轮继续重试（但不越过 deadline）
+                _sleep_until_next(interval, deadline)
+                continue
+
+            print(f"[{now:%H:%M:%S}] 周用量 {pct:.1f}%"
+                  f"（剩余 {info['remaining']}/{info['limit']}）")
+
+            # ---- 条件二：用量达到阈值 ----
+            if pct >= args.percent:
+                reason = f"本周用量已达 {pct:.1f}%（阈值 {args.percent:g}%）"
+                title, body = build_message(reason, info)
+                _send_and_print(cfg, title, body, reason)
+                return EXIT_QUOTA
+
+            # 未触发：睡到下轮（不越过 deadline，保证时刻触发准时）
+            _sleep_until_next(interval, deadline)
+    except KeyboardInterrupt:
+        print("\n收到 Ctrl+C，监控已停止。")
+        return EXIT_OK
+
+
+def _sleep_until_next(interval, deadline):
+    """睡到下一轮轮询，但睡眠总时长不超过 deadline（保证时刻触发不迟到）。"""
+    remaining = (deadline - datetime.now()).total_seconds()
+    time.sleep(max(1, min(interval, remaining)))
+
+
+def _send_and_print(cfg, title, body, reason):
+    """发送 Server酱 通知并打印结果摘要。
+
+    :param cfg: 配置字典
+    :param title: 通知标题
+    :param body: 通知正文
+    :param reason: 触发原因（用于控制台打印）
+    """
+    ok = send_serverchan(cfg["serverchan_sendkey"], title, body)
+    print(f"[{reason}] Server酱 通知{'成功' if ok else '失败'}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
