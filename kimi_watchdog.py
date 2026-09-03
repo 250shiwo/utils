@@ -68,3 +68,39 @@ def load_config(config_path=CONFIG_FILE):
     if os.environ.get("KIMI_API_KEY"):
         cfg["api_key"] = os.environ["KIMI_API_KEY"]
     return cfg
+
+
+# ==================== 时间参数解析 ====================
+def parse_deadline(time_str, now=None):
+    """解析时间参数为目标时刻（datetime 对象）。
+
+    支持两种格式：
+        "HH:MM"          -> 今天的该时刻；若启动时已过（<= now）则顺延到明天
+        "YYYY-MM-DD HH:MM" -> 完整日期时间，按字面解析
+    :param time_str: 时间参数字符串
+    :param now: 当前时间（仅用于测试注入，默认 datetime.now()）
+    :return: 目标时刻 datetime 对象
+    :raises ValueError: 两种格式都无法解析时
+    """
+    if now is None:
+        now = datetime.now()
+    time_str = time_str.strip()
+
+    # 先尝试 "HH:MM" 格式
+    try:
+        t = datetime.strptime(time_str, "%H:%M")
+        target = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        # 今天该时刻已过（或恰好等于现在）则顺延到明天
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+    except ValueError:
+        pass
+
+    # 再尝试 "YYYY-MM-DD HH:MM" 完整格式
+    try:
+        return datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise ValueError(
+            f"无法解析时间参数: {time_str!r}，支持 'HH:MM' 或 'YYYY-MM-DD HH:MM' 格式"
+        )
