@@ -5,7 +5,7 @@
 
 ## 1. 背景与目标
 
-Kimi Code（Kimi 编程订阅）提供每周 API 额度，额度用尽会影响开发工作。本项目开发一个监控脚本，当**本周用量达到设定阈值**或**到达指定时刻**时，通过 **Server酱（微信推送）** 和 **QQ邮箱（SMTP）** 发送提醒通知，然后退出。
+Kimi Code（Kimi 编程订阅）提供每周 API 额度，额度用尽会影响开发工作。本项目开发一个监控脚本，当**本周用量达到设定阈值**或**到达指定时刻**时，通过 **Server酱（微信推送）** 发送提醒通知，然后退出。
 
 ## 2. 数据来源
 
@@ -26,7 +26,7 @@ Kimi Code（Kimi 编程订阅）提供每周 API 额度，额度用尽会影响�
 
 - `kimi_watchdog.py`：全部逻辑，约 300 行，带详细中文注释
 - `config.json`：配置文件
-- 仅使用标准库：`urllib.request`（HTTP）、`smtplib` + `email`（邮件）、`json`、`argparse`、`time`、`datetime`
+- 仅使用标准库：`urllib.request`（HTTP，Server酱推送同样用它）、`json`、`argparse`、`time`、`datetime`
 - 要求 Python 3.8+，无需 pip 安装任何依赖
 
 ## 4. 用法
@@ -57,21 +57,14 @@ python kimi_watchdog.py <percent> <time> [--test-notify]
 {
   "api_key": "sk-...",
   "poll_interval_sec": 600,
-  "serverchan_sendkey": "SCT...",
-  "email": {
-    "smtp_host": "smtp.qq.com",
-    "smtp_port": 465,
-    "username": "xxx@qq.com",
-    "auth_code": "SMTP授权码",
-    "to": "xxx@qq.com"
-  }
+  "serverchan_sendkey": "SCT..."
 }
 ```
 
 - `api_key` 也可通过环境变量 `KIMI_API_KEY` 提供，**环境变量优先**于配置文件。
 - `poll_interval_sec`：轮询间隔秒数，默认 600（10 分钟）。
-- `serverchan_sendkey` 留空/缺失则跳过 Server酱渠道。
-- `email` 整块留空/缺失则跳过邮件渠道；两个渠道都未配置时报错退出。
+- `serverchan_sendkey` 未配置时脚本报错退出。
+- Server酱**无需安装任何 SDK**：它就是一个 HTTP POST 接口（`https://sctapi.ftqq.com/<sendkey>.send`），标准库 `urllib` 直接调用，保持零依赖。
 
 ## 7. 核心流程
 
@@ -84,14 +77,14 @@ python kimi_watchdog.py <percent> <time> [--test-notify]
    - 未触发则 `sleep(poll_interval_sec)` 后继续。
 4. **触发与通知**：
    - 组装消息，包含：触发原因、本周用量（`已用/总量 (百分比)`）、剩余额度、5 小时窗口剩余、重置时间、会员等级；
-   - 逐渠道发送，**单渠道失败记录错误但不影响其他渠道**；
+   - 调用 Server酱 推送（单次 HTTP POST）；
    - 控制台打印发送结果与触发原因，按退出码约定退出。
 
 ## 8. 错误处理
 
 - **API 请求失败**（网络错误、超时 10s、非 200 状态码、JSON 解析失败）：打印警告，本轮跳过，下轮重试；**连续 5 次失败**则向可用渠道发送"监控异常"通知后以退出码 3 退出；连续失败计数在成功一次后清零。
 - **周配额重置**：轮询期间若 `resetTime` 已过、百分比回落，属正常现象，继续监控，不做特殊处理。
-- **通知发送失败**：Server酱 返回非 0 `code` 或 HTTP 错误、SMTP 抛异常，均打印错误详情，不影响另一渠道。
+- **通知发送失败**：Server酱 返回非 0 `code` 或 HTTP 错误时打印错误详情；监控模式下发送失败不改变触发退出码，`--test-notify` 模式下发送失败返回退出码 3。
 - **Ctrl+C**：捕获 `KeyboardInterrupt`，打印提示后以退出码 0 退出。
 
 ## 9. 模块划分（文件内部函数级）
@@ -103,8 +96,6 @@ python kimi_watchdog.py <percent> <time> [--test-notify]
 | `fetch_usage(api_key)` | 调用 usages API，返回解析后的用量字典 |
 | `compute_used_percent(usage)` | 计算周用量百分比 |
 | `send_serverchan(sendkey, title, body)` | Server酱推送 |
-| `send_email(cfg, subject, body)` | QQ邮箱 SMTP 发送 |
-| `notify_all(cfg, title, body)` | 双渠道分发，汇总结果 |
 | `build_message(reason, usage)` | 组装通知内容 |
 | `main()` | 参数解析与主循环 |
 

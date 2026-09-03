@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 单文件零依赖 Python 脚本，监控 Kimi Code 周额度，当用量达到阈值或到达指定时刻时通过 Server酱 + QQ邮箱 通知后退出。
+**Goal:** 单文件零依赖 Python 脚本，监控 Kimi Code 周额度，当用量达到阈值或到达指定时刻时通过 Server酱（微信推送）通知后退出。
 
-**Architecture:** 单文件 `kimi_watchdog.py` 承载全部逻辑（配置加载 → 轮询 API → 条件判断 → 双渠道通知 → 退出），函数级模块划分，`config.json` 提供配置。测试用标准库 `unittest` + `unittest.mock`。
+**Architecture:** 单文件 `kimi_watchdog.py` 承载全部逻辑（配置加载 → 轮询 API → 条件判断 → Server酱通知 → 退出），函数级模块划分，`config.json` 提供配置。测试用标准库 `unittest` + `unittest.mock`。
 
-**Tech Stack:** Python 3.8+ 标准库（urllib / smtplib / email / json / argparse / datetime / time），无任何第三方依赖。
+**Tech Stack:** Python 3.8+ 标准库（urllib / json / argparse / datetime / time），无任何第三方依赖。Server酱为纯 HTTP POST 接口，无需 SDK。
 
 ## Global Constraints
 
@@ -30,7 +30,7 @@
 - Create: `tests/test_kimi_watchdog.py`
 
 **Interfaces:**
-- Produces: `load_config(config_path=CONFIG_FILE) -> dict`（键：`api_key`、`poll_interval_sec`、`serverchan_sendkey`、`email`）；常量 `API_URL`、`CONFIG_FILE`、`HTTP_TIMEOUT`、`MAX_CONSECUTIVE_FAILURES`、`EXIT_OK/EXIT_QUOTA/EXIT_TIME/EXIT_ERROR`
+- Produces: `load_config(config_path=CONFIG_FILE) -> dict`（键：`api_key`、`poll_interval_sec`、`serverchan_sendkey`）；常量 `API_URL`、`CONFIG_FILE`、`HTTP_TIMEOUT`、`MAX_CONSECUTIVE_FAILURES`、`EXIT_OK/EXIT_QUOTA/EXIT_TIME/EXIT_ERROR`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -70,7 +70,6 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(cfg["api_key"], "")
         self.assertEqual(cfg["poll_interval_sec"], 600)
         self.assertEqual(cfg["serverchan_sendkey"], "")
-        self.assertIsNone(cfg["email"])
 
     def test_load_from_file(self):
         """正常读取配置文件"""
@@ -78,13 +77,11 @@ class TestLoadConfig(unittest.TestCase):
             "api_key": "sk-file",
             "poll_interval_sec": 300,
             "serverchan_sendkey": "SCT123",
-            "email": {"smtp_host": "smtp.qq.com"},
         })
         cfg = kw.load_config(path)
         self.assertEqual(cfg["api_key"], "sk-file")
         self.assertEqual(cfg["poll_interval_sec"], 300)
         self.assertEqual(cfg["serverchan_sendkey"], "SCT123")
-        self.assertEqual(cfg["email"]["smtp_host"], "smtp.qq.com")
 
     def test_env_var_overrides_file(self):
         """环境变量 KIMI_API_KEY 优先于配置文件中的 api_key"""
@@ -115,8 +112,8 @@ kimi-watchdog：Kimi Code API 周额度监控脚本
 
 功能：
     启动时传入「用量百分比阈值」和「目标时刻」两个参数，脚本常驻轮询
-    Kimi Code 用量接口；任一条件满足时，通过 Server酱（微信推送）和
-    QQ邮箱（SMTP）发送提醒通知，然后退出。
+    Kimi Code 用量接口；任一条件满足时，通过 Server酱（微信推送）
+    发送提醒通知，然后退出。
 
 用法：
     python kimi_watchdog.py <percent> <time> [--test-notify]
@@ -132,17 +129,12 @@ kimi-watchdog：Kimi Code API 周额度监控脚本
 import argparse
 import json
 import os
-import smtplib
-import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
-from email.header import Header
-from email.mime.text import MIMEText
-from email.utils import formataddr
 
 # ---------------- 常量定义 ----------------
 API_URL = "https://api.kimi.com/coding/v1/usages"  # Kimi Code 用量查询接口（非官方，社区逆向）
@@ -167,15 +159,13 @@ def load_config(config_path=CONFIG_FILE):
     :return: 配置字典，键包括：
         api_key           Kimi Code API Key（字符串，可能为空）
         poll_interval_sec 轮询间隔秒数（默认 600）
-        serverchan_sendkey Server酱 SendKey（空字符串表示不启用）
-        email             邮件配置字典（None 表示不启用）
+        serverchan_sendkey Server酱 SendKey（空字符串表示未配置）
     """
     # 默认配置
     cfg = {
         "api_key": "",
         "poll_interval_sec": 600,
         "serverchan_sendkey": "",
-        "email": None,
     }
     # 配置文件存在则覆盖默认值
     if os.path.exists(config_path):
@@ -193,14 +183,7 @@ def load_config(config_path=CONFIG_FILE):
 {
   "api_key": "sk-你的KimiCode的APIKey",
   "poll_interval_sec": 600,
-  "serverchan_sendkey": "SCT你的Server酱SendKey，留空则不启用",
-  "email": {
-    "smtp_host": "smtp.qq.com",
-    "smtp_port": 465,
-    "username": "你的QQ号@qq.com",
-    "auth_code": "QQ邮箱SMTP授权码（不是QQ密码）",
-    "to": "收件人邮箱@qq.com"
-  }
+  "serverchan_sendkey": "SCT你的Server酱SendKey"
 }
 ```
 
@@ -560,7 +543,7 @@ Expected: 提交成功
 
 ---
 
-### Task 4: 通知发送（Server酱 + QQ邮箱 + 分发）
+### Task 4: 通知发送（Server酱 微信推送）
 
 **Files:**
 - Modify: `kimi_watchdog.py`
@@ -568,24 +551,13 @@ Expected: 提交成功
 
 **Interfaces:**
 - Produces:
-  - `send_serverchan(sendkey, title, body) -> bool`：推送成功返回 True，任何失败打印警告并返回 False
-  - `send_email(email_cfg, subject, body) -> bool`：`email_cfg` 为 `{"smtp_host", "smtp_port", "username", "auth_code", "to"}`
-  - `notify_all(cfg, title, body) -> list[tuple[str, bool]]`：按配置分发到已启用渠道，返回 `[(渠道名, 是否成功)]`；失败渠道不影响其他渠道
+  - `send_serverchan(sendkey, title, body) -> bool`：推送成功返回 True，任何失败（网络错误、HTTP 错误、返回非 0 code）打印警告并返回 False，不抛异常。Server酱只是一个 HTTP POST 接口，无需安装任何 SDK
 
 - [ ] **Step 1: 写失败测试**
 
 在 `tests/test_kimi_watchdog.py` 的 `if __name__ == "__main__":` 之前追加：
 
 ```python
-EMAIL_CFG = {
-    "smtp_host": "smtp.qq.com",
-    "smtp_port": 465,
-    "username": "from@qq.com",
-    "auth_code": "authcode",
-    "to": "to@qq.com",
-}
-
-
 class TestSendServerChan(unittest.TestCase):
     """send_serverchan：Server酱推送"""
 
@@ -606,65 +578,12 @@ class TestSendServerChan(unittest.TestCase):
         with mock.patch.object(kw.urllib.request, "urlopen",
                                side_effect=OSError("timeout")):
             self.assertFalse(kw.send_serverchan("SCT123", "标题", "正文"))
-
-
-class TestSendEmail(unittest.TestCase):
-    """send_email：QQ邮箱 SMTP 发送"""
-
-    def test_ok(self):
-        """正常发送：登录并调用 sendmail"""
-        fake_smtp = mock.MagicMock()
-        with mock.patch.object(kw.smtplib, "SMTP_SSL", return_value=fake_smtp):
-            self.assertTrue(kw.send_email(EMAIL_CFG, "主题", "正文"))
-        fake_smtp.login.assert_called_once_with("from@qq.com", "authcode")
-        fake_smtp.sendmail.assert_called_once()
-        # 收件人正确
-        self.assertEqual(fake_smtp.sendmail.call_args[0][1], ["to@qq.com"])
-
-    def test_smtp_error(self):
-        """SMTP 抛异常不向外传播，返回 False"""
-        with mock.patch.object(kw.smtplib, "SMTP_SSL",
-                               side_effect=smtplib.SMTPException("fail")):
-            self.assertFalse(kw.send_email(EMAIL_CFG, "主题", "正文"))
-
-
-class TestNotifyAll(unittest.TestCase):
-    """notify_all：多渠道分发"""
-
-    def test_both_channels(self):
-        """两个渠道都配置时都调用"""
-        cfg = {"serverchan_sendkey": "SCT123", "email": EMAIL_CFG}
-        with mock.patch.object(kw, "send_serverchan", return_value=True) as ms, \
-                mock.patch.object(kw, "send_email", return_value=True) as me:
-            results = kw.notify_all(cfg, "标题", "正文")
-        self.assertEqual(results, [("Server酱", True), ("QQ邮箱", True)])
-        ms.assert_called_once()
-        me.assert_called_once()
-
-    def test_serverchan_failure_does_not_block_email(self):
-        """Server酱失败不影响邮件渠道"""
-        cfg = {"serverchan_sendkey": "SCT123", "email": EMAIL_CFG}
-        with mock.patch.object(kw, "send_serverchan", return_value=False), \
-                mock.patch.object(kw, "send_email", return_value=True) as me:
-            results = kw.notify_all(cfg, "标题", "正文")
-        self.assertEqual(results, [("Server酱", False), ("QQ邮箱", True)])
-        me.assert_called_once()
-
-    def test_no_channels(self):
-        """未配置任何渠道返回空列表"""
-        self.assertEqual(kw.notify_all({}, "标题", "正文"), [])
-```
-
-同时在该测试文件顶部 import 区域追加（若尚无）：
-
-```python
-import smtplib
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `python -m unittest tests.test_kimi_watchdog -v`
-Expected: 新增 7 个测试 FAIL/ERROR，原 16 个仍 PASS
+Expected: 新增 3 个测试 FAIL/ERROR，原 16 个仍 PASS
 
 - [ ] **Step 3: 写最小实现**
 
@@ -674,6 +593,9 @@ Expected: 新增 7 个测试 FAIL/ERROR，原 16 个仍 PASS
 # ==================== 通知发送 ====================
 def send_serverchan(sendkey, title, body):
     """通过 Server酱 推送到微信。
+
+    Server酱是一个纯 HTTP POST 接口，无需安装任何 SDK：
+    POST https://sctapi.ftqq.com/<sendkey>.send，表单参数 title 与 desp。
 
     :param sendkey: Server酱的 SendKey
     :param title: 通知标题（最长 32 字，服务端截断）
@@ -694,69 +616,19 @@ def send_serverchan(sendkey, title, body):
     except Exception as e:
         print(f"[警告] Server酱发送失败: {e}")
         return False
-
-
-def send_email(email_cfg, subject, body):
-    """通过 QQ邮箱 SMTP（SSL 465 端口）发送邮件。
-
-    :param email_cfg: 邮件配置 {"smtp_host", "smtp_port",
-                      "username", "auth_code", "to"}
-    :param subject: 邮件主题
-    :param body: 邮件正文（纯文本）
-    :return: True=发送成功，False=失败（已打印警告，不抛异常）
-    """
-    # 组装 MIME 邮件（UTF-8 编码，避免中文乱码）
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = Header(subject, "utf-8")
-    msg["From"] = formataddr(("kimi-watchdog", email_cfg["username"]))
-    msg["To"] = email_cfg["to"]
-    try:
-        # 使用 SSL 直连（QQ邮箱 465 端口）
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL(email_cfg["smtp_host"], email_cfg["smtp_port"],
-                              timeout=HTTP_TIMEOUT, context=ctx) as server:
-            server.login(email_cfg["username"], email_cfg["auth_code"])
-            server.sendmail(email_cfg["username"], [email_cfg["to"]],
-                            msg.as_string())
-        return True
-    except Exception as e:
-        print(f"[警告] 邮件发送失败: {e}")
-        return False
-
-
-def notify_all(cfg, title, body):
-    """按配置分发通知到所有已启用渠道。
-
-    单渠道失败只记录结果，不影响其他渠道。
-
-    :param cfg: load_config 返回的配置字典
-    :param title: 通知标题
-    :param body: 通知正文
-    :return: [(渠道名, 是否成功)] 列表；未配置任何渠道时为空列表
-    """
-    results = []
-    # 渠道一：Server酱
-    if cfg.get("serverchan_sendkey"):
-        ok = send_serverchan(cfg["serverchan_sendkey"], title, body)
-        results.append(("Server酱", ok))
-    # 渠道二：QQ邮箱
-    if cfg.get("email"):
-        ok = send_email(cfg["email"], title, body)
-        results.append(("QQ邮箱", ok))
-    return results
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m unittest tests.test_kimi_watchdog -v`
-Expected: 23 tests PASS
+Expected: 19 tests PASS
 
 - [ ] **Step 5: 提交**
 
 `.gcm.txt` 内容：
 
 ```
-feat: 实现 Server酱与 QQ邮箱双渠道通知及分发逻辑
+feat: 实现 Server酱微信推送通知
 ```
 
 Run: `git add kimi_watchdog.py tests/test_kimi_watchdog.py && git commit -F .gcm.txt && del .gcm.txt`
@@ -817,7 +689,7 @@ class TestBuildMessage(unittest.TestCase):
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `python -m unittest tests.test_kimi_watchdog -v`
-Expected: 新增 4 个测试 FAIL/ERROR，原 23 个仍 PASS
+Expected: 新增 4 个测试 FAIL/ERROR，原 19 个仍 PASS
 
 - [ ] **Step 3: 写最小实现**
 
@@ -875,7 +747,7 @@ def build_message(reason, info):
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m unittest tests.test_kimi_watchdog -v`
-Expected: 27 tests PASS
+Expected: 23 tests PASS
 
 - [ ] **Step 5: 提交**
 
@@ -905,9 +777,9 @@ Expected: 提交成功
 在 `tests/test_kimi_watchdog.py` 的 `if __name__ == "__main__":` 之前追加：
 
 ```python
-# 主循环测试用的基础配置：只启用 Server酱，间隔 0 秒
+# 主循环测试用的基础配置：启用 Server酱，轮询间隔 0 秒
 LOOP_CFG = {"api_key": "sk-test", "poll_interval_sec": 0,
-            "serverchan_sendkey": "SCT123", "email": None}
+            "serverchan_sendkey": "SCT123"}
 
 
 def _make_usage_data(remaining):
@@ -932,37 +804,37 @@ class TestMainArgs(unittest.TestCase):
         """未配置 API Key 时以 EXIT_ERROR 退出"""
         with mock.patch.object(kw, "load_config",
                                return_value={"api_key": "", "poll_interval_sec": 600,
-                                             "serverchan_sendkey": "", "email": None}):
+                                             "serverchan_sendkey": ""}):
             self.assertEqual(kw.main(["80", "2099-12-31 23:59"]), kw.EXIT_ERROR)
 
-    def test_no_notify_channel(self):
-        """未配置任何通知渠道时以 EXIT_ERROR 退出"""
+    def test_no_serverchan_key(self):
+        """未配置 Server酱 SendKey 时以 EXIT_ERROR 退出"""
         cfg = {"api_key": "sk", "poll_interval_sec": 600,
-               "serverchan_sendkey": "", "email": None}
+               "serverchan_sendkey": ""}
         with mock.patch.object(kw, "load_config", return_value=cfg):
             self.assertEqual(kw.main(["80", "2099-12-31 23:59"]), kw.EXIT_ERROR)
 
 
 class TestMainLoop(unittest.TestCase):
-    """主循环触发逻辑（mock 掉 sleep / fetch_usage / notify_all）"""
+    """主循环触发逻辑（mock 掉 sleep / fetch_usage / send_serverchan）"""
 
     def _run(self, argv, fetch=None):
         """运行 main 的公共封装：mock 配置、sleep、通知"""
         with mock.patch.object(kw, "load_config", return_value=dict(LOOP_CFG)), \
                 mock.patch.object(kw.time, "sleep"), \
-                mock.patch.object(kw, "notify_all") as mock_notify, \
+                mock.patch.object(kw, "send_serverchan") as mock_send, \
                 mock.patch.object(kw, "fetch_usage", fetch):
             code = kw.main(argv)
-        return code, mock_notify
+        return code, mock_send
 
     def test_quota_trigger(self):
         """用量 95% >= 阈值 90% -> EXIT_QUOTA，通知一次"""
-        code, mock_notify = self._run(["90", "2099-12-31 23:59"],
-                                      fetch=mock.Mock(return_value=_make_usage_data("5")))
+        code, mock_send = self._run(["90", "2099-12-31 23:59"],
+                                    fetch=mock.Mock(return_value=_make_usage_data("5")))
         self.assertEqual(code, kw.EXIT_QUOTA)
-        mock_notify.assert_called_once()
+        mock_send.assert_called_once()
         # 标题包含触发信息
-        title = mock_notify.call_args[0][1]
+        title = mock_send.call_args[0][1]
         self.assertIn("本周用量", title)
 
     def test_quota_not_reached_polls_again(self):
@@ -976,18 +848,18 @@ class TestMainLoop(unittest.TestCase):
 
     def test_time_trigger(self):
         """到达指定时刻 -> EXIT_TIME"""
-        code, mock_notify = self._run(["90", "2000-01-01 00:00"],
-                                      fetch=mock.Mock(return_value=_make_usage_data("50")))
+        code, mock_send = self._run(["90", "2000-01-01 00:00"],
+                                    fetch=mock.Mock(return_value=_make_usage_data("50")))
         self.assertEqual(code, kw.EXIT_TIME)
-        mock_notify.assert_called_once()
+        mock_send.assert_called_once()
 
     def test_consecutive_failures_exit_error(self):
         """API 连续 5 次失败 -> 发异常通知并以 EXIT_ERROR 退出"""
         fetch = mock.Mock(side_effect=RuntimeError("boom"))
-        code, mock_notify = self._run(["90", "2099-12-31 23:59"], fetch=fetch)
+        code, mock_send = self._run(["90", "2099-12-31 23:59"], fetch=fetch)
         self.assertEqual(code, kw.EXIT_ERROR)
         self.assertEqual(fetch.call_count, kw.MAX_CONSECUTIVE_FAILURES)
-        mock_notify.assert_called_once()  # 发送"监控异常"通知
+        mock_send.assert_called_once()  # 发送"监控异常"通知
 
     def test_failure_counter_resets(self):
         """失败计数在成功后清零：失败4次、成功1次、再失败5次才退出"""
@@ -1007,19 +879,17 @@ class TestTestNotifyMode(unittest.TestCase):
         """发送测试通知并返回 EXIT_OK"""
         cfg = dict(LOOP_CFG)
         with mock.patch.object(kw, "load_config", return_value=cfg), \
-                mock.patch.object(kw, "notify_all",
-                                  return_value=[("Server酱", True)]) as mock_notify:
+                mock.patch.object(kw, "send_serverchan", return_value=True) as mock_send:
             code = kw.main(["--test-notify"])
         self.assertEqual(code, kw.EXIT_OK)
-        mock_notify.assert_called_once()
-        self.assertIn("测试", mock_notify.call_args[0][1])
+        mock_send.assert_called_once()
+        self.assertIn("测试", mock_send.call_args[0][1])
 
-    def test_partial_failure_returns_error(self):
-        """任一渠道失败 -> EXIT_ERROR"""
+    def test_send_failure_returns_error(self):
+        """发送失败 -> EXIT_ERROR"""
         cfg = dict(LOOP_CFG)
         with mock.patch.object(kw, "load_config", return_value=cfg), \
-                mock.patch.object(kw, "notify_all",
-                                  return_value=[("Server酱", False)]):
+                mock.patch.object(kw, "send_serverchan", return_value=False):
             code = kw.main(["--test-notify"])
         self.assertEqual(code, kw.EXIT_ERROR)
 ```
@@ -1043,7 +913,7 @@ def main(argv=None):
     """
     parser = argparse.ArgumentParser(
         description="Kimi Code 周额度监控：用量达阈值或到指定时刻时，"
-                    "通过 Server酱/QQ邮箱 通知后退出。")
+                    "通过 Server酱（微信推送）通知后退出。")
     parser.add_argument("percent", nargs="?", type=float,
                         help="周用量百分比阈值，如 80 表示用量达 80%% 触发")
     parser.add_argument("deadline", nargs="?",
@@ -1059,13 +929,13 @@ def main(argv=None):
 
     # --test-notify 模式：只发测试通知
     if args.test_notify:
-        if not (cfg.get("serverchan_sendkey") or cfg.get("email")):
-            print("错误：未配置任何通知渠道，请检查 config.json")
+        if not cfg.get("serverchan_sendkey"):
+            print("错误：未配置 serverchan_sendkey，请检查 config.json")
             return EXIT_ERROR
         print("正在发送测试通知...")
-        results = notify_all(cfg, "【Kimi额度监控】测试通知",
+        ok = send_serverchan(cfg["serverchan_sendkey"], "【Kimi额度监控】测试通知",
                              "这是一条 kimi-watchdog 测试通知，收到即说明渠道配置正确。")
-        return EXIT_OK if all(ok for _, ok in results) else EXIT_ERROR
+        return EXIT_OK if ok else EXIT_ERROR
 
     # 监控模式：两个位置参数必填
     if args.percent is None or args.deadline is None:
@@ -1075,8 +945,8 @@ def main(argv=None):
     if not cfg.get("api_key"):
         print("错误：未配置 API Key（config.json 的 api_key 或环境变量 KIMI_API_KEY）")
         return EXIT_ERROR
-    if not (cfg.get("serverchan_sendkey") or cfg.get("email")):
-        print("错误：未配置任何通知渠道，请检查 config.json")
+    if not cfg.get("serverchan_sendkey"):
+        print("错误：未配置 serverchan_sendkey，请检查 config.json")
         return EXIT_ERROR
 
     # 解析目标时刻
@@ -1106,7 +976,8 @@ def main(argv=None):
                     title = "【Kimi额度提醒】已到达指定时刻"
                     body = (f"触发原因：已到达指定时刻 {deadline:%Y-%m-%d %H:%M}\n"
                             f"（触发时用量数据获取失败）")
-                _report(notify_all(cfg, title, body), f"已到达指定时刻 {deadline:%Y-%m-%d %H:%M}")
+                _send_and_print(cfg, title, body,
+                                f"已到达指定时刻 {deadline:%Y-%m-%d %H:%M}")
                 return EXIT_TIME
 
             # ---- 轮询用量 ----
@@ -1121,9 +992,9 @@ def main(argv=None):
                 print(f"[警告] 第 {failures} 次 API 请求失败: {e}")
                 # 连续失败达上限：通知监控异常并退出
                 if failures >= MAX_CONSECUTIVE_FAILURES:
-                    _report(notify_all(
+                    _send_and_print(
                         cfg, "【Kimi额度监控】监控异常",
-                        f"API 连续 {failures} 次请求失败，监控已退出。\n最后错误：{e}"),
+                        f"API 连续 {failures} 次请求失败，监控已退出。\n最后错误：{e}",
                         "监控异常")
                     return EXIT_ERROR
                 # 未达上限：睡到下轮继续重试（但不越过 deadline）
@@ -1137,7 +1008,7 @@ def main(argv=None):
             if pct >= args.percent:
                 reason = f"本周用量已达 {pct:.1f}%（阈值 {args.percent:g}%）"
                 title, body = build_message(reason, info)
-                _report(notify_all(cfg, title, body), reason)
+                _send_and_print(cfg, title, body, reason)
                 return EXIT_QUOTA
 
             # 未触发：睡到下轮（不越过 deadline，保证时刻触发准时）
@@ -1153,13 +1024,16 @@ def _sleep_until_next(interval, deadline):
     time.sleep(max(1, min(interval, remaining)))
 
 
-def _report(results, reason):
-    """打印通知发送结果摘要。"""
-    if not results:
-        print(f"[{reason}] 未配置任何通知渠道（理论不应发生）。")
-        return
-    for name, ok in results:
-        print(f"[{reason}] {name} 通知{'成功' if ok else '失败'}")
+def _send_and_print(cfg, title, body, reason):
+    """发送 Server酱 通知并打印结果摘要。
+
+    :param cfg: 配置字典
+    :param title: 通知标题
+    :param body: 通知正文
+    :param reason: 触发原因（用于控制台打印）
+    """
+    ok = send_serverchan(cfg["serverchan_sendkey"], title, body)
+    print(f"[{reason}] Server酱 通知{'成功' if ok else '失败'}")
 
 
 if __name__ == "__main__":
@@ -1169,7 +1043,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m unittest tests.test_kimi_watchdog -v`
-Expected: 37 tests PASS
+Expected: 33 tests PASS
 
 若 `test_quota_not_reached_polls_again` 等主循环测试卡死，检查 `_sleep_until_next` 中 `time.sleep` 是否被正确 mock（测试 mock 的是 `kw.time.sleep`，实现中必须通过 `time.sleep(...)` 方式调用）。
 
@@ -1210,9 +1084,9 @@ Expected: 提交成功
 # kimi-watchdog
 
 Kimi Code API 周额度监控脚本：当本周用量达到设定阈值，或到达指定时刻时，
-通过 **Server酱（微信推送）** 和 **QQ邮箱** 发送提醒通知，然后退出。
+通过 **Server酱（微信推送）** 发送提醒通知，然后退出。
 
-零依赖，仅需 Python 3.8+。
+零依赖，仅需 Python 3.8+（Server酱是纯 HTTP 接口，无需安装 SDK）。
 
 ## 快速开始
 
@@ -1223,8 +1097,7 @@ Kimi Code API 周额度监控脚本：当本周用量达到设定阈值，或到
    ```
 
    - `api_key`：Kimi Code 的 API Key（也可用环境变量 `KIMI_API_KEY`，优先级更高）
-   - `serverchan_sendkey`：[Server酱](https://sct.ftqq.com/) 的 SendKey，留空则不启用
-   - `email`：QQ邮箱 SMTP 配置（需在 QQ邮箱设置中开启 SMTP 并获取授权码），整块留空则不启用
+   - `serverchan_sendkey`：[Server酱](https://sct.ftqq.com/) 的 SendKey
 
 2. 测试通知渠道连通性：
 
@@ -1273,7 +1146,6 @@ API Key 不通用。
 | `api_key` | 空 | Kimi Code API Key |
 | `poll_interval_sec` | 600 | 轮询间隔（秒） |
 | `serverchan_sendkey` | 空 | Server酱 SendKey |
-| `email` | 空 | QQ邮箱 SMTP 配置（smtp_host/smtp_port/username/auth_code/to） |
 
 ## 运行测试
 
@@ -1285,7 +1157,7 @@ python -m unittest tests.test_kimi_watchdog -v
 - [ ] **Step 2: 全量测试**
 
 Run: `python -m unittest tests.test_kimi_watchdog -v`
-Expected: 37 tests PASS, 0 FAIL
+Expected: 33 tests PASS, 0 FAIL
 
 - [ ] **Step 3: 验收清单逐项核对**
 
