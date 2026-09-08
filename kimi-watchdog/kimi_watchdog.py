@@ -20,6 +20,7 @@ kimi-watchdog：Kimi Code API 周额度监控脚本
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -292,6 +293,21 @@ def save_refresh_token(config_path, new_refresh_token):
         raise
 
 
+def check_refresh_token_expiry(refresh_token):
+    """本地解码 refresh_token 的 JWT exp（不验签、不发请求），用于启动自检。
+
+    :param refresh_token: JWT 字符串
+    :return: 剩余有效天数（float，负数=已过期）；无法解析返回 None
+    """
+    try:
+        payload = refresh_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return (claims["exp"] - time.time()) / 86400
+    except Exception:
+        return None
+
+
 def extract_usage_info(data):
     """把 API 原始 JSON 规整为统一的信息字典。
 
@@ -434,6 +450,16 @@ def main(argv=None):
 
     # ---- 加载与校验配置 ----
     cfg = load_config(args.config)
+
+    # ---- refresh_token 有效期预检：只警告，不阻断监控 ----
+    if cfg.get("refresh_token"):
+        days = check_refresh_token_expiry(cfg["refresh_token"])
+        if days is None:
+            print("[警告] refresh_token 无法解析（不是合法 JWT），删除功能将不可用")
+        elif days < 0:
+            print("[警告] refresh_token 已过期，删除功能将不可用，请重新抓取")
+        elif days < 7:
+            print(f"[提醒] refresh_token 剩余有效期约 {days:.1f} 天，建议尽快重新抓取")
 
     # --test-notify 模式：只发测试通知
     if args.test_notify:

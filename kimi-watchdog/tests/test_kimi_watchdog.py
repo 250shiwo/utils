@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """kimi_watchdog 单元测试（标准库 unittest，无需安装任何依赖）"""
 
+import base64
+import contextlib
+import io
 import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from datetime import datetime
@@ -592,6 +596,57 @@ class TestTestDeleteMode(unittest.TestCase):
         with mock.patch.object(kw, "load_config", return_value=dict(LOOP_CFG)):
             code = kw.main(["--test-delete"])
         self.assertEqual(code, kw.EXIT_ERROR)
+
+
+class TestCheckRefreshTokenExpiry(unittest.TestCase):
+    """check_refresh_token_expiry：本地解码 JWT exp（不发请求）"""
+
+    def _jwt(self, exp):
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
+        return f"aaa.{payload}.bbb"
+
+    def test_days_remaining(self):
+        """30 天后过期：返回值约等于 30"""
+        days = kw.check_refresh_token_expiry(self._jwt(time.time() + 30 * 86400))
+        self.assertAlmostEqual(days, 30.0, places=1)
+
+    def test_expired_is_negative(self):
+        """已过期：返回负数"""
+        self.assertLess(kw.check_refresh_token_expiry(
+            self._jwt(time.time() - 86400)), 0)
+
+    def test_garbage_returns_none(self):
+        """无法解析：返回 None"""
+        self.assertIsNone(kw.check_refresh_token_expiry("not-a-jwt"))
+
+
+class TestStartupExpiryWarning(unittest.TestCase):
+    """启动自检：过期/临期 refresh_token 只警告，不阻断监控"""
+
+    def _expired_cfg(self):
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"exp": time.time() - 86400}).encode()).rstrip(b"=").decode()
+        return dict(LOOP_CFG, refresh_token=f"aaa.{payload}.bbb")
+
+    def test_expired_token_warns_but_monitors(self):
+        """过期的 refresh_token：打印警告，监控照常触发退出"""
+        # StringIO 作为上下文管理器退出时会被 close，需在 with 外创建才能事后读取
+        buf = io.StringIO()
+        with mock.patch.object(kw, "load_config",
+                               return_value=self._expired_cfg()), \
+                mock.patch.object(kw.time, "sleep"), \
+                mock.patch.object(kw, "send_serverchan"), \
+                mock.patch.object(kw, "refresh_access_token",
+                                  return_value=("at-1", "rt-2")), \
+                mock.patch.object(kw, "save_refresh_token"), \
+                mock.patch.object(kw, "list_api_keys", return_value=[]), \
+                mock.patch.object(kw, "fetch_usage",
+                                  return_value=_make_usage_data("5")), \
+                contextlib.redirect_stdout(buf):
+            code = kw.main(["90", "2099-12-31 23:59"])
+        self.assertEqual(code, kw.EXIT_QUOTA)
+        self.assertIn("警告", buf.getvalue())
 
 
 if __name__ == "__main__":
