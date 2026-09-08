@@ -33,6 +33,10 @@ from datetime import datetime, timedelta
 API_URL = "https://api.kimi.com/coding/v1/usages"  # Kimi Code 用量查询接口（非官方，社区逆向）
 CONFIG_FILE = "config.json"                        # 默认配置文件路径
 SERVERCHAN_URL = "https://sctapi.ftqq.com/{}.send"  # Server酱推送接口，{} 处填 sendkey
+# 网页版控制台接口（非官方，逆向自 kimi.com 前端；与 sk- API Key 不同体系）
+REFRESH_URL = "https://www.kimi.com/api/auth/token/refresh"
+LIST_KEYS_URL = "https://www.kimi.com/apiv2/kimi.gateway.credentials.v1.APIKeyService/ListAPIKeys"
+DELETE_KEY_URL = "https://www.kimi.com/apiv2/kimi.gateway.credentials.v1.APIKeyService/DeleteAPIKey"
 HTTP_TIMEOUT = 10                                   # HTTP 请求超时（秒）
 MAX_CONSECUTIVE_FAILURES = 5                        # API 连续失败多少次后判定监控异常
 
@@ -41,6 +45,7 @@ EXIT_OK = 0
 EXIT_QUOTA = 1
 EXIT_TIME = 2
 EXIT_ERROR = 3
+EXIT_DELETE_FAILED = 4  # 额度触发但删除链路失败
 
 
 # ==================== 配置加载 ====================
@@ -121,6 +126,34 @@ def fetch_usage(api_key):
         if resp.status != 200:
             raise RuntimeError(f"API 返回状态码 {resp.status}")
         return json.loads(resp.read().decode("utf-8"))
+
+
+# ==================== 网页版控制台接口（Key 删除链路） ====================
+def refresh_access_token(refresh_token):
+    """用 refresh_token 换新的 access_token（refresh_token 同时被轮换）。
+
+    GET /api/auth/token/refresh，Bearer 认证。refresh_token 来自浏览器
+    localStorage，签发后 90 天有效；本接口返回的新 refresh_token 重新计时 90 天。
+
+    :param refresh_token: 网页版 refresh_token（JWT）
+    :return: (access_token, new_refresh_token) 二元组
+    :raises RuntimeError: HTTP 非 200（异常对象带 .status 属性，401=需重新抓取）
+    :raises Exception: 网络错误、超时、JSON 解析失败等
+    """
+    req = urllib.request.Request(
+        REFRESH_URL, headers={"Authorization": f"Bearer {refresh_token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            if resp.status != 200:
+                err = RuntimeError(f"刷新接口返回状态码 {resp.status}")
+                err.status = resp.status
+                raise err
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err = RuntimeError(f"刷新接口返回状态码 {e.code}")
+        err.status = e.code
+        raise err
+    return body["access_token"], body["refresh_token"]
 
 
 def extract_usage_info(data):

@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime
 from unittest import mock
 
@@ -360,6 +361,28 @@ class TestTestNotifyMode(unittest.TestCase):
                 mock.patch.object(kw, "send_serverchan", return_value=False):
             code = kw.main(["--test-notify"])
         self.assertEqual(code, kw.EXIT_ERROR)
+
+
+class TestRefreshAccessToken(unittest.TestCase):
+    """refresh_access_token：用 refresh_token 换新 access_token"""
+
+    def test_ok(self):
+        """200：返回 (access_token, 新 refresh_token)，请求头带 Bearer refresh_token"""
+        resp = _FakeResponse({"access_token": "at-1", "refresh_token": "rt-2"})
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               return_value=resp) as m:
+            result = kw.refresh_access_token("rt-1")
+        self.assertEqual(result, ("at-1", "rt-2"))
+        req = m.call_args[0][0]
+        self.assertEqual(req.headers["Authorization"], "Bearer rt-1")
+
+    def test_http_error_carries_status(self):
+        """401：抛 RuntimeError，且 .status == 401（供上层识别重新抓取）"""
+        err = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
+        with mock.patch.object(kw.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(RuntimeError) as cm:
+                kw.refresh_access_token("rt-1")
+        self.assertEqual(cm.exception.status, 401)
 
 
 if __name__ == "__main__":
