@@ -49,7 +49,7 @@ python kimi_watchdog.py <percent> <time> [--test-notify] [--test-delete] [--conf
 | 0 | 正常退出（测试通知/干跑成功 / Ctrl+C） |
 | 1 | 额度阈值触发 |
 | 2 | 指定时刻触发 |
-| 3 | 监控异常（API 连续 5 次失败） |
+| 3 | 监控异常（API 连续 5 次失败）；测试通知/干跑失败 |
 | 4 | 额度阈值触发，但删除链路失败 |
 
 ## 数据来源

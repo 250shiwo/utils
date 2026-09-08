@@ -427,6 +427,13 @@ class TestListApiKeys(unittest.TestCase):
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body, {"page_size": 100, "scope": ["FEATURE_CODING"]})
 
+    def test_non_200_raises(self):
+        """非 200 状态码抛异常"""
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               return_value=_FakeResponse({}, status=500)):
+            with self.assertRaises(RuntimeError):
+                kw.list_api_keys("at-1")
+
 
 class TestFindKeyId(unittest.TestCase):
     """find_key_id：把完整 api_key 与列表中的掩码 key 匹配"""
@@ -559,6 +566,13 @@ class TestMainLoopKeyDeletion(unittest.TestCase):
             keys=mock.Mock(return_value=dup))
         self.assertEqual(code, kw.EXIT_DELETE_FAILED)
         m_del.assert_not_called()
+
+    def test_delete_failure_exit_4(self):
+        """删除接口异常：exit 4，通知附错误"""
+        code, m_send, _, _ = self._run(
+            self.CFG_RT, mock.Mock(return_value=_make_usage_data("5")),
+            delete=mock.Mock(side_effect=RuntimeError("DeleteAPIKey 返回状态码 500")))
+        self.assertEqual(code, kw.EXIT_DELETE_FAILED)
 
 
 class TestTestDeleteMode(unittest.TestCase):
