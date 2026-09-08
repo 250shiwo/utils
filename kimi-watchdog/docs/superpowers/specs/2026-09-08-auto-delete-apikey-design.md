@@ -1,7 +1,7 @@
 # 额度触发自动删除 API Key 设计文档
 
-日期：2026-09-08
-状态：已确认（用户已批准）
+日期：2026-09-08（同日修订：触发时写回轮换后的 refresh_token）
+状态：已确认（用户已批准，含修订）
 前置文档：`2026-09-03-kimi-watchdog-design.md`（监控脚本主体设计）
 
 ## 1. 背景与目标
@@ -63,14 +63,15 @@ POST https://www.kimi.com/apiv2/kimi.gateway.credentials.v1.APIKeyService/Delete
 
 ## 3. 方案选型
 
-**方案 A（已选定）：触发时一次性刷新**
+**方案 A+（已选定）：触发时一次性刷新，并把轮换出的新 refresh_token 写回 config**
 
-config 存 `refresh_token`（90 天）；仅在触发那一刻执行 刷新 → List 匹配 → Delete。
-不写回 config，无后台保活，无额外状态。
+config 存 `refresh_token`（签发后 90 天有效）；仅在触发那一刻执行 刷新 → 写回 → List 匹配 → Delete。
+**只在触发时刷新，所以每次运行至多写回一次 config**，无周期任务、无并发写。
+写回让 90 天有效期随每次触发滚动续期：只要触发间隔不超过 90 天，凭据长期有效。
 
 被否决的方案：
 
-- B（A + 刷新后写回 config 保活）：写文件有竞态/损坏风险，收益小。
+- B（监控期间周期性刷新保活）：频繁写 config，竞态/损坏风险与复杂度都更高，收益小。
 - C（config 直接存 key_id 跳过 List）：key 重建后需手动改 config，且 ID 只能抓包看到，不够自动化。
 
 ## 4. 详细设计
@@ -81,7 +82,7 @@ config 存 `refresh_token`（90 天）；仅在触发那一刻执行 刷新 → 
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `refresh_token` | 空字符串 | 网页版 localStorage 里的 `refresh_token`，90 天有效；空 = 删除功能关闭 |
+| `refresh_token` | 空字符串 | 网页版 localStorage 里的 `refresh_token`，90 天有效；空 = 删除功能关闭；触发时自动轮换并写回 |
 
 `config.json` 已被 `.gitignore` 忽略，凭证不会误提交。
 
@@ -96,7 +97,12 @@ config 存 `refresh_token`（90 天）；仅在触发那一刻执行 刷新 → 
 ```python
 def refresh_access_token(refresh_token):
     """GET /api/auth/token/refresh，Bearer 认证。
-    返回新的 access_token；HTTP 非 200 / 网络错误抛异常（401 单独标识）。"""
+    返回 (新 access_token, 新 refresh_token)；HTTP 非 200 / 网络错误抛异常（401 单独标识）。"""
+
+def save_refresh_token(config_path, new_refresh_token):
+    """把轮换出的新 refresh_token 写回配置文件。
+    读-改-写：保留文件中其余所有键；先写临时文件再 os.replace 原子替换，
+    避免写一半损坏 config。UTF-8、indent=2、ensure_ascii=False。"""
 
 def list_api_keys(access_token):
     """POST ListAPIKeys（scope=FEATURE_CODING），返回 apiKeys 列表。"""
@@ -116,9 +122,11 @@ def delete_api_key(access_token, key_id):
 `pct >= 阈值` 且配置了 `refresh_token` 时，按序执行：
 
 1. 构建原有用量通知内容；
-2. 执行删除链路（刷新 → 列表 → 匹配 → 删除）；
-3. 把删除结果（成功 / 失败原因）追加到通知正文；
-4. Server酱 发送，按下方退出码退出。
+2. 刷新 access_token；成功后**立即把新 refresh_token 写回 config**
+   （写回失败不阻断后续删除，仅在通知中附警告）；
+3. 列表 → 匹配 → 删除；
+4. 把删除结果（成功 / 失败原因 / 写回警告）追加到通知正文；
+5. Server酱 发送，按下方退出码退出。
 
 错误处理矩阵：
 
@@ -126,6 +134,7 @@ def delete_api_key(access_token, key_id):
 |---|---|---|---|
 | 刷新 | 401 | 「refresh_token 已失效，请重新登录 kimi.com 后从 localStorage 重新抓取」 | 4 |
 | 刷新/列表/删除 | 网络异常、非 200 | 通知中附异常信息 | 4 |
+| 写回 config | 磁盘错误等 | 通知中附警告「新 refresh_token 写回失败，旧值仍可能可用」 | 按删除结果（1 或 4） |
 | 匹配 | 0 个匹配 | 「未找到匹配的 Key，可能已被删除，无需处理」 | 1 |
 | 匹配 | 多个匹配 | 「掩码后缀撞车匹配到多把 Key，为安全起见未删除」 | 4 |
 | 删除 | 成功 | 「已删除 Key：name=xx id=xx」 | 1 |
@@ -144,18 +153,21 @@ def delete_api_key(access_token, key_id):
 
 配置后自检用：执行刷新 + 列表 + 匹配，打印「将删除 name=xx id=xx」但**不调用删除接口**。
 与 `--test-notify` 一样不需要位置参数。成功返回 0，失败返回 3。
-注意：每次运行都会消耗一次 refresh_token 轮换（实测旧值仍可用，无副作用）。
+干跑**不写回** config（无副作用）；refresh_token 轮换后旧值实测仍可用，不影响后续真实触发。
 
 ## 5. 测试计划
 
 沿用现有 `unittest + mock` 风格（零依赖），新增覆盖：
 
-- `refresh_access_token`：200 返回 token；401/500/网络异常抛出；
+- `refresh_access_token`：200 返回 (access_token, refresh_token)；401/500/网络异常抛出；
+- `save_refresh_token`：临时文件 round-trip（写入后能读回新值、其余键原样保留）；
+  目标文件不存在/无权限时抛异常；
 - `list_api_keys`：正常解析；非 200 抛出；
 - `find_key_id`：恰好 1 个匹配 / 0 匹配返回 None / 多匹配抛异常 / 掩码格式异常跳过；
 - `delete_api_key`：200 成功；非 200 抛出；
-- 主循环额度触发分支：删除成功（exit 1）/ 刷新 401（exit 4）/ 未配置 refresh_token（exit 1，行为同现状）/ 0 匹配（exit 1）；
-- `--test-delete` 模式：mock 三函数，验证不调用删除、退出码正确；
+- 主循环额度触发分支：删除成功且写回被调用（exit 1）/ 写回失败仍删除成功（exit 1）/
+  刷新 401（exit 4，不删不写）/ 未配置 refresh_token（exit 1，行为同现状）/ 0 匹配（exit 1）；
+- `--test-delete` 模式：mock 链路函数，验证不调用删除、不写回、退出码正确；
 - 启动自检：过期 / 临期 refresh_token 的警告输出（不阻断）。
 
 回归：现有测试套件全部保持绿色。
@@ -163,7 +175,7 @@ def delete_api_key(access_token, key_id):
 ## 6. 文档与收尾
 
 - README：`refresh_token` 抓取方法（F12 → Application → Local Storage → kimi.com）、
-  退出码 4、`--test-delete` 用法；
+  触发时自动写回的行为说明、退出码 4、`--test-delete` 用法；
 - 模块 docstring 更新退出码约定与功能描述；
 - 删除一次性验证脚本 `verify_refresh.py`；
 - 把当前最新的 refresh_token 写入用户本机 `config.json`。
@@ -171,6 +183,6 @@ def delete_api_key(access_token, key_id):
 ## 7. 明确不做（YAGNI）
 
 - 自动创建新 Key（用户明确只要删除）；
-- 把轮换出的新 refresh_token 写回 config / 后台保活；
+- 监控期间的周期性刷新保活（只在触发时刷新+写回一次）；
 - 删除账号下全部 Key 或按名称删除；
 - DeleteAPIKey 的真实调用测试（破坏性，由真实触发验证）。
