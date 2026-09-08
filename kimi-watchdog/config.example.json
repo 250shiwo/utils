@@ -1,5 +1,6 @@
 {
   "api_key": "sk-你的KimiCode的APIKey",
   "poll_interval_sec": 600,
-  "serverchan_sendkey": "SCT你的Server酱SendKey"
+  "serverchan_sendkey": "SCT你的Server酱SendKey",
+  "refresh_token": ""
 }

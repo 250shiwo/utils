@@ -7,16 +7,21 @@ kimi-watchdog：Kimi Code API 周额度监控脚本
     启动时传入「用量百分比阈值」和「目标时刻」两个参数，脚本常驻轮询
     Kimi Code 用量接口；任一条件满足时，通过 Server酱（微信推送）
     发送提醒通知，然后退出。
+    额度阈值触发时，若配置了 refresh_token，自动删除 config 中 api_key
+    对应的 API Key 后通知退出。
+    另提供 --test-delete 干跑模式：刷新+匹配并打印将删除的 Key，
+    但不真正删除，用于配置后自检。
 
 用法：
-    python kimi_watchdog.py <percent> <time> [--test-notify]
+    python kimi_watchdog.py <percent> <time> [--test-notify] [--test-delete]
     例：python kimi_watchdog.py 80 18:00
 
 退出码：
-    0 = 正常退出（含 --test-notify 成功、Ctrl+C 主动停止）
+    0 = 正常退出（含 --test-notify/--test-delete 成功、Ctrl+C 主动停止）
     1 = 额度阈值触发
     2 = 指定时刻触发
     3 = 监控异常（API 连续 5 次请求失败）
+    4 = 额度阈值触发，但删除链路失败
 """
 
 import argparse
