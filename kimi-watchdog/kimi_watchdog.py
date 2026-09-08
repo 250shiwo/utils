@@ -426,6 +426,8 @@ def main(argv=None):
                         help="目标时刻，如 18:00（已过则明天）或 2026-09-03 18:00")
     parser.add_argument("--test-notify", action="store_true",
                         help="仅发送测试通知验证渠道连通性，不做监控")
+    parser.add_argument("--test-delete", action="store_true",
+                        help="删除链路干跑：刷新+匹配并打印将删除的 Key，但不真正删除")
     parser.add_argument("--config", default=CONFIG_FILE,
                         help=f"配置文件路径（默认 {CONFIG_FILE}）")
     args = parser.parse_args(argv)
@@ -442,6 +444,24 @@ def main(argv=None):
         ok = send_serverchan(cfg["serverchan_sendkey"], "【Kimi额度监控】测试通知",
                              "这是一条 kimi-watchdog 测试通知，收到即说明渠道配置正确。")
         return EXIT_OK if ok else EXIT_ERROR
+
+    # --test-delete 模式：删除链路干跑（刷新+匹配，不删除、不写回）
+    if args.test_delete:
+        if not cfg.get("refresh_token"):
+            print("错误：未配置 refresh_token，请检查 config.json")
+            return EXIT_ERROR
+        print("正在执行删除链路干跑（不会真正删除）...")
+        try:
+            access_token, _ = refresh_access_token(cfg["refresh_token"])
+            found = find_key_id(list_api_keys(access_token), cfg["api_key"])
+        except Exception as e:
+            print(f"干跑失败：{e}")
+            return EXIT_ERROR
+        if found is None:
+            print("未找到匹配的 Key（可能已被删除），请检查 api_key 配置")
+            return EXIT_ERROR
+        print(f"干跑成功：额度触发时将删除 name={found[1]} id={found[0]}")
+        return EXIT_OK
 
     # 监控模式：两个位置参数必填
     if args.percent is None or args.deadline is None:

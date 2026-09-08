@@ -557,5 +557,42 @@ class TestMainLoopKeyDeletion(unittest.TestCase):
         m_del.assert_not_called()
 
 
+class TestTestDeleteMode(unittest.TestCase):
+    """--test-delete 干跑模式：验证链路但不真删、不写回"""
+
+    CFG_RT = dict(LOOP_CFG, refresh_token="rt-1")
+    KEY_ENTRY = {"key": "sk-...test", "name": "监控", "id": "id-1"}
+
+    def _run(self, cfg, refresh=None, keys=None):
+        with mock.patch.object(kw, "load_config", return_value=dict(cfg)), \
+                mock.patch.object(kw, "refresh_access_token",
+                                  refresh or mock.Mock(return_value=("at-1", "rt-2"))), \
+                mock.patch.object(kw, "list_api_keys",
+                                  keys if keys is not None
+                                  else mock.Mock(return_value=[self.KEY_ENTRY])), \
+                mock.patch.object(kw, "delete_api_key") as m_del, \
+                mock.patch.object(kw, "save_refresh_token") as m_save:
+            code = kw.main(["--test-delete"])
+        return code, m_del, m_save
+
+    def test_dry_run_success(self):
+        """匹配成功：exit 0，不调用删除、不写回"""
+        code, m_del, m_save = self._run(self.CFG_RT)
+        self.assertEqual(code, kw.EXIT_OK)
+        m_del.assert_not_called()
+        m_save.assert_not_called()
+
+    def test_dry_run_no_match_returns_error(self):
+        """0 匹配：exit 3（说明配置/账号状态有问题，值得告警）"""
+        code, _, _ = self._run(self.CFG_RT, keys=mock.Mock(return_value=[]))
+        self.assertEqual(code, kw.EXIT_ERROR)
+
+    def test_dry_run_missing_refresh_token(self):
+        """未配置 refresh_token：exit 3"""
+        with mock.patch.object(kw, "load_config", return_value=dict(LOOP_CFG)):
+            code = kw.main(["--test-delete"])
+        self.assertEqual(code, kw.EXIT_ERROR)
+
+
 if __name__ == "__main__":
     unittest.main()
