@@ -157,6 +157,64 @@ def refresh_access_token(refresh_token):
     return body["access_token"], body["refresh_token"]
 
 
+def _console_headers(access_token):
+    """网页版控制台接口（apiv2 Connect RPC）的公共请求头。"""
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+        "Origin": "https://www.kimi.com",
+        "Referer": "https://www.kimi.com/code/console",
+    }
+
+
+def list_api_keys(access_token):
+    """列出账号下 scope 为 FEATURE_CODING 的全部 API Key。
+
+    注意返回的 key 字段是掩码（如 "sk-ki...dSFze"），不是完整 Key。
+
+    :param access_token: refresh_access_token 换来的 access_token
+    :return: apiKeys 列表（dict 数组，含 id/name/key/status 等）
+    :raises RuntimeError: HTTP 非 200
+    :raises Exception: 网络错误、超时、JSON 解析失败等
+    """
+    body = json.dumps(
+        {"page_size": 100, "scope": ["FEATURE_CODING"]}).encode("utf-8")
+    req = urllib.request.Request(
+        LIST_KEYS_URL, data=body, headers=_console_headers(access_token))
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"ListAPIKeys 返回状态码 {resp.status}")
+        return json.loads(resp.read().decode("utf-8")).get("apiKeys", []) or []
+
+
+def find_key_id(api_keys, api_key):
+    """把 config 的完整 api_key 与列表中的掩码 key 匹配，找出要删的 Key。
+
+    掩码形如 "sk-ki...dSFze"：按 "..." 拆前缀/后缀，api_key 同时满足
+    startswith(前缀) 且 endswith(后缀) 即视为同一把。
+
+    :param api_keys: list_api_keys 返回的列表
+    :param api_key: config 中完整的 API Key
+    :return: 恰好 1 个匹配时返回 (id, name)；0 个匹配返回 None
+    :raises RuntimeError: 匹配到多把（掩码撞车），为安全起见拒绝删除
+    """
+    matches = []
+    for item in api_keys:
+        masked = item.get("key", "")
+        if "..." not in masked:
+            continue
+        prefix, suffix = masked.split("...", 1)
+        if api_key.startswith(prefix) and api_key.endswith(suffix):
+            matches.append(item)
+    if len(matches) > 1:
+        names = "、".join(str(m.get("name")) for m in matches)
+        raise RuntimeError(f"掩码匹配到多把 Key（{names}），为安全起见未删除")
+    if not matches:
+        return None
+    return matches[0].get("id"), matches[0].get("name")
+
+
 def save_refresh_token(config_path, new_refresh_token):
     """把轮换出的新 refresh_token 写回配置文件（读-改-写，其余键原样保留）。
 

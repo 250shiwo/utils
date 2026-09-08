@@ -408,5 +408,50 @@ class TestSaveRefreshToken(unittest.TestCase):
             kw.save_refresh_token("no_such_dir_9x7/no_such.json", "x")
 
 
+class TestListApiKeys(unittest.TestCase):
+    """list_api_keys：列出账号下 FEATURE_CODING 的 API Key"""
+
+    def test_ok(self):
+        """200：返回 apiKeys 列表；请求体与认证头正确"""
+        resp = _FakeResponse({"apiKeys": [{"id": "id-1", "key": "sk-ki...dSFze"}]})
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               return_value=resp) as m:
+            keys = kw.list_api_keys("at-1")
+        self.assertEqual(keys, [{"id": "id-1", "key": "sk-ki...dSFze"}])
+        req = m.call_args[0][0]
+        self.assertEqual(req.headers["Authorization"], "Bearer at-1")
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body, {"page_size": 100, "scope": ["FEATURE_CODING"]})
+
+
+class TestFindKeyId(unittest.TestCase):
+    """find_key_id：把完整 api_key 与列表中的掩码 key 匹配"""
+
+    KEYS = [
+        {"key": "sk-ki...dSFze", "name": "配额查询", "id": "id-1"},
+        {"key": "sk-ki...4HPF8", "name": "DBX", "id": "id-2"},
+    ]
+
+    def test_single_match(self):
+        """恰好 1 个匹配：返回 (id, name)"""
+        self.assertEqual(kw.find_key_id(self.KEYS, "sk-kiAbCdEdSFze"),
+                         ("id-1", "配额查询"))
+
+    def test_no_match_returns_none(self):
+        """0 个匹配：返回 None（Key 可能已被删除）"""
+        self.assertIsNone(kw.find_key_id(self.KEYS, "sk-kiAbCdEzzzzz"))
+
+    def test_multi_match_raises(self):
+        """掩码后缀撞车匹配到多把：抛异常，拒绝删除"""
+        keys = self.KEYS + [{"key": "sk-ki...dSFze", "name": "撞车", "id": "id-3"}]
+        with self.assertRaises(RuntimeError):
+            kw.find_key_id(keys, "sk-kiAbCdEdSFze")
+
+    def test_malformed_masked_key_skipped(self):
+        """不含 '...' 的异常条目直接跳过，不崩溃"""
+        keys = [{"key": "sk-plain-no-mask", "name": "x", "id": "id-9"}]
+        self.assertIsNone(kw.find_key_id(keys, "sk-plain-no-mask"))
+
+
 if __name__ == "__main__":
     unittest.main()
