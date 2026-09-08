@@ -453,5 +453,27 @@ class TestFindKeyId(unittest.TestCase):
         self.assertIsNone(kw.find_key_id(keys, "sk-plain-no-mask"))
 
 
+class TestDeleteApiKey(unittest.TestCase):
+    """delete_api_key：按 id 删除 API Key"""
+
+    def test_ok(self):
+        """200：不抛异常即成功；请求体为 {"id": ...}"""
+        resp = _FakeResponse({})
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               return_value=resp) as m:
+            kw.delete_api_key("at-1", "id-1")
+        req = m.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body, {"id": "id-1"})
+        self.assertEqual(req.headers["Authorization"], "Bearer at-1")
+
+    def test_non_200_raises(self):
+        """非 200 状态码抛异常"""
+        with mock.patch.object(kw.urllib.request, "urlopen",
+                               return_value=_FakeResponse({}, status=500)):
+            with self.assertRaises(RuntimeError):
+                kw.delete_api_key("at-1", "id-1")
+
+
 if __name__ == "__main__":
     unittest.main()

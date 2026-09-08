@@ -215,6 +215,22 @@ def find_key_id(api_keys, api_key):
     return matches[0].get("id"), matches[0].get("name")
 
 
+def delete_api_key(access_token, key_id):
+    """删除指定 id 的 API Key。HTTP 200 即成功，响应体不解析。
+
+    :param access_token: refresh_access_token 换来的 access_token
+    :param key_id: find_key_id 找出的 Key id
+    :raises RuntimeError: HTTP 非 200
+    :raises Exception: 网络错误、超时等
+    """
+    body = json.dumps({"id": key_id}).encode("utf-8")
+    req = urllib.request.Request(
+        DELETE_KEY_URL, data=body, headers=_console_headers(access_token))
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"DeleteAPIKey 返回状态码 {resp.status}")
+
+
 def save_refresh_token(config_path, new_refresh_token):
     """把轮换出的新 refresh_token 写回配置文件（读-改-写，其余键原样保留）。
 
