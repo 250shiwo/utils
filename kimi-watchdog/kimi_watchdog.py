@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -154,6 +155,34 @@ def refresh_access_token(refresh_token):
         err.status = e.code
         raise err
     return body["access_token"], body["refresh_token"]
+
+
+def save_refresh_token(config_path, new_refresh_token):
+    """把轮换出的新 refresh_token 写回配置文件（读-改-写，其余键原样保留）。
+
+    先写同目录临时文件再 os.replace 原子替换，避免写一半损坏 config。
+    每次额度触发至多调用一次，无并发写场景。
+
+    :param config_path: 配置文件路径
+    :param new_refresh_token: 刷新接口返回的新 refresh_token
+    :raises Exception: 文件不存在、无权限、磁盘错误等
+    """
+    with open(config_path, encoding="utf-8") as f:
+        data = json.load(f)
+    data["refresh_token"] = new_refresh_token
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(config_path)), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, config_path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def extract_usage_info(data):

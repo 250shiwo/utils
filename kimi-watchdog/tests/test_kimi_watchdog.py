@@ -385,5 +385,28 @@ class TestRefreshAccessToken(unittest.TestCase):
         self.assertEqual(cm.exception.status, 401)
 
 
+class TestSaveRefreshToken(unittest.TestCase):
+    """save_refresh_token：把轮换出的新 refresh_token 写回配置文件"""
+
+    def test_roundtrip_preserves_other_keys(self):
+        """写回后其余配置键原样保留"""
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"api_key": "sk-x", "refresh_token": "old",
+                       "poll_interval_sec": 300}, f)
+        self.addCleanup(os.remove, path)
+        kw.save_refresh_token(path, "new-rt")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["refresh_token"], "new-rt")
+        self.assertEqual(data["api_key"], "sk-x")
+        self.assertEqual(data["poll_interval_sec"], 300)
+
+    def test_missing_file_raises(self):
+        """目标文件不存在时抛异常（由上层兜底告警）"""
+        with self.assertRaises(FileNotFoundError):
+            kw.save_refresh_token("no_such_dir_9x7/no_such.json", "x")
+
+
 if __name__ == "__main__":
     unittest.main()
