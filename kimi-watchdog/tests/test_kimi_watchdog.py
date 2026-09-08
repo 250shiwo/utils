@@ -475,5 +475,87 @@ class TestDeleteApiKey(unittest.TestCase):
                 kw.delete_api_key("at-1", "id-1")
 
 
+class TestMainLoopKeyDeletion(unittest.TestCase):
+    """额度触发时的 Key 删除链路（refresh/save/list/delete 全部 mock）"""
+
+    CFG_RT = dict(LOOP_CFG, refresh_token="rt-1")
+    # find_key_id 用真实实现：掩码 "sk-...test" 前后缀匹配 LOOP_CFG 的 "sk-test"
+    KEY_ENTRY = {"key": "sk-...test", "name": "监控", "id": "id-1"}
+
+    def _run(self, cfg, fetch, refresh=None, save=None, keys=None, delete=None):
+        with mock.patch.object(kw, "load_config", return_value=dict(cfg)), \
+                mock.patch.object(kw.time, "sleep"), \
+                mock.patch.object(kw, "send_serverchan") as m_send, \
+                mock.patch.object(kw, "fetch_usage", fetch), \
+                mock.patch.object(kw, "refresh_access_token",
+                                  refresh or mock.Mock(return_value=("at-1", "rt-2"))), \
+                mock.patch.object(kw, "save_refresh_token",
+                                  save or mock.Mock()) as m_save, \
+                mock.patch.object(kw, "list_api_keys",
+                                  keys if keys is not None
+                                  else mock.Mock(return_value=[self.KEY_ENTRY])), \
+                mock.patch.object(kw, "delete_api_key",
+                                  delete or mock.Mock()) as m_del:
+            code = kw.main(["90", "2099-12-31 23:59"])
+        return code, m_send, m_save, m_del
+
+    def test_delete_success(self):
+        """删除成功：exit 1，save 写回新 refresh_token，通知含“已删除”"""
+        code, m_send, m_save, m_del = self._run(
+            self.CFG_RT, mock.Mock(return_value=_make_usage_data("5")))
+        self.assertEqual(code, kw.EXIT_QUOTA)
+        m_save.assert_called_once()
+        self.assertEqual(m_save.call_args[0][1], "rt-2")
+        m_del.assert_called_once_with("at-1", "id-1")
+        self.assertIn("已删除", m_send.call_args[0][2])
+
+    def test_save_failure_still_deletes(self):
+        """写回失败不阻断删除：exit 1，通知附警告"""
+        code, m_send, _, m_del = self._run(
+            self.CFG_RT, mock.Mock(return_value=_make_usage_data("5")),
+            save=mock.Mock(side_effect=OSError("disk full")))
+        self.assertEqual(code, kw.EXIT_QUOTA)
+        m_del.assert_called_once()
+        self.assertIn("写回", m_send.call_args[0][2])
+
+    def test_refresh_401_aborts_delete(self):
+        """刷新 401：exit 4，不删不写回，通知提示重新抓取"""
+        err = RuntimeError("刷新接口返回状态码 401")
+        err.status = 401
+        code, m_send, m_save, m_del = self._run(
+            self.CFG_RT, mock.Mock(return_value=_make_usage_data("5")),
+            refresh=mock.Mock(side_effect=err))
+        self.assertEqual(code, kw.EXIT_DELETE_FAILED)
+        m_save.assert_not_called()
+        m_del.assert_not_called()
+        self.assertIn("重新抓取", m_send.call_args[0][2])
+
+    def test_no_refresh_token_legacy_behavior(self):
+        """未配置 refresh_token：不删，exit 1（行为与现状一致）"""
+        code, _, m_save, m_del = self._run(
+            LOOP_CFG, mock.Mock(return_value=_make_usage_data("5")))
+        self.assertEqual(code, kw.EXIT_QUOTA)
+        m_save.assert_not_called()
+        m_del.assert_not_called()
+
+    def test_no_match_is_success(self):
+        """0 匹配（Key 可能已删）：视为无需处理，exit 1，不调用删除"""
+        code, m_send, _, m_del = self._run(
+            self.CFG_RT, mock.Mock(return_value=_make_usage_data("5")),
+            keys=mock.Mock(return_value=[]))
+        self.assertEqual(code, kw.EXIT_QUOTA)
+        m_del.assert_not_called()
+        self.assertIn("无需", m_send.call_args[0][2])
+
+    def test_multi_match_aborts(self):
+        """多匹配：exit 4，不删除"""
+        dup = [self.KEY_ENTRY, dict(self.KEY_ENTRY, id="id-2")]
+        code, _, _, m_del = self._run(
+            self.CFG_RT, mock.Mock(return_value=_make_usage_data("5")),
+            keys=mock.Mock(return_value=dup))
+        self.assertEqual(code, kw.EXIT_DELETE_FAILED)
+        m_del.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

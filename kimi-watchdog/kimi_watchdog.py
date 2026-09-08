@@ -231,6 +231,39 @@ def delete_api_key(access_token, key_id):
             raise RuntimeError(f"DeleteAPIKey 返回状态码 {resp.status}")
 
 
+def _attempt_key_deletion(cfg, config_path):
+    """额度触发后执行删除链路：刷新 → 写回 → 列表 → 匹配 → 删除。
+
+    0 匹配（Key 可能已被手动删除）视为成功（无需处理）；写回失败不阻断删除，
+    仅在结果描述中附警告。
+
+    :param cfg: 配置字典（需含 refresh_token、api_key）
+    :param config_path: 配置文件路径（写回 refresh_token 用）
+    :return: (是否成功, 结果描述)；False 对应退出码 EXIT_DELETE_FAILED
+    """
+    try:
+        access_token, new_refresh = refresh_access_token(cfg["refresh_token"])
+    except Exception as e:
+        if getattr(e, "status", None) == 401:
+            return False, ("refresh_token 已失效，请重新登录 kimi.com 后"
+                           "从 localStorage 重新抓取")
+        return False, f"刷新 access_token 失败：{e}"
+    # 刷新成功：立即把轮换出的新 refresh_token 写回（90 天有效期滚动续期）
+    warning = ""
+    try:
+        save_refresh_token(config_path, new_refresh)
+    except Exception as e:
+        warning = f"（警告：新 refresh_token 写回 {config_path} 失败：{e}）"
+    try:
+        found = find_key_id(list_api_keys(access_token), cfg["api_key"])
+        if found is None:
+            return True, "未找到匹配的 Key，可能已被删除，无需处理" + warning
+        delete_api_key(access_token, found[0])
+        return True, f"已删除 Key：name={found[1]} id={found[0]}" + warning
+    except Exception as e:
+        return False, f"{e}" + warning
+
+
 def save_refresh_token(config_path, new_refresh_token):
     """把轮换出的新 refresh_token 写回配置文件（读-改-写，其余键原样保留）。
 
@@ -481,8 +514,15 @@ def main(argv=None):
             if pct >= args.percent:
                 reason = f"本周用量已达 {pct:.1f}%（阈值 {args.percent:g}%）"
                 title, body = build_message(reason, info)
+                exit_code = EXIT_QUOTA
+                # 配置了 refresh_token 才启用自动删除；未配置时行为与原来一致
+                if cfg.get("refresh_token"):
+                    ok, detail = _attempt_key_deletion(cfg, args.config)
+                    body += f"\n\nKey 删除：{detail}"
+                    if not ok:
+                        exit_code = EXIT_DELETE_FAILED
                 _send_and_print(cfg, title, body, reason)
-                return EXIT_QUOTA
+                return exit_code
 
             # 未触发：睡到下轮（不越过 deadline，保证时刻触发准时）
             _sleep_until_next(interval, deadline)
