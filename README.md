@@ -6,7 +6,7 @@
 
 | 工具 | 说明 |
 |---|---|
-| [kimi-watchdog](./kimi-watchdog) | Kimi Code API 周额度监控：用量达阈值或到指定时刻时，通过 Server酱 微信推送提醒 |
+| [kimi-watchdog](./kimi-watchdog) | Kimi Code API 周额度监控：用量达阈值或到指定时刻时 Server酱 微信推送提醒；阈值触发时可自动删除对应 API Key（可选，支持多配置文件多账号） |
 
 ## 添加新工具
 
